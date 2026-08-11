@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>LungVision AI</title>
+
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        rel="stylesheet">
+
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
+        rel="stylesheet">
+
+
+    <style>
+
+        body {
+
+            margin: 0;
+
+            font-family: Arial, sans-serif;
+
+            min-height: 100vh;
+
+            background:
+                radial-gradient(
+                    circle at top left,
+                    #172554,
+                    transparent 35%
+                ),
+                #07111f;
+
+            color: white;
+
+        }
+
+
+        .navbar-custom {
+
+            background: #0b1628;
+
+            border-bottom:
+                1px solid #243247;
+
+            padding: 15px 0;
+
+        }
+
+
+        .brand {
+
+            font-size: 22px;
+
+            font-weight: bold;
+
+        }
+
+
+        .brand-icon {
+
+            display: inline-flex;
+
+            width: 40px;
+
+            height: 40px;
+
+            align-items: center;
+
+            justify-content: center;
+
+            border-radius: 10px;
+
+            background: #2563eb;
+
+            margin-right: 10px;
+
+        }
+
+
+        .hero {
+
+            padding: 70px 0 30px;
+
+            text-align: center;
+
+        }
+
+
+        .badge-ai {
+
+            display: inline-block;
+
+            padding: 8px 15px;
+
+            border-radius: 30px;
+
+            background: #172554;
+
+            color: #93c5fd;
+
+            font-size: 13px;
+
+            font-weight: bold;
+
+        }
+
+
+        .hero h1 {
+
+            font-size: 46px;
+
+            font-weight: 800;
+
+            margin-top: 20px;
+
+        }
+
+
+        .hero p {
+
+            color: #94a3b8;
+
+            font-size: 17px;
+
+        }
+
+
+        .upload-card {
+
+            max-width: 700px;
+
+            margin: auto;
+
+            background: #0f1b2d;
+
+            border:
+                1px solid #243247;
+
+            border-radius: 22px;
+
+            padding: 40px;
+
+            box-shadow:
+                0 25px 60px
+                rgba(0, 0, 0, 0.35);
+
+        }
+
+
+        .upload-area {
+
+            border:
+                2px dashed #334155;
+
+            border-radius: 15px;
+
+            padding: 35px;
+
+            text-align: center;
+
+            transition: 0.3s;
+
+        }
+
+
+        .upload-area:hover {
+
+            border-color: #2563eb;
+
+            background: #111f35;
+
+        }
+
+
+        .upload-icon {
+
+            font-size: 55px;
+
+            color: #22d3ee;
+
+            margin-bottom: 15px;
+
+        }
+
+
+        .form-control {
+
+            background: #111c2e;
+
+            border:
+                1px solid #334155;
+
+            color: white;
+
+            padding: 14px;
+
+        }
+
+
+        .form-control:focus {
+
+            background: #111c2e;
+
+            color: white;
+
+            border-color: #2563eb;
+
+            box-shadow: none;
+
+        }
+
+
+        .btn-analyze {
+
+            width: 100%;
+
+            padding: 15px;
+
+            margin-top: 25px;
+
+            border: none;
+
+            border-radius: 12px;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    #2563eb,
+                    #06b6d4
+                );
+
+            color: white;
+
+            font-size: 17px;
+
+            font-weight: bold;
+
+        }
+
+
+        .btn-analyze:hover {
+
+            transform: translateY(-2px);
+
+            box-shadow:
+                0 10px 30px
+                rgba(37, 99, 235, 0.3);
+
+        }
+
+
+        .tech-section {
+
+            margin-top: 30px;
+
+            text-align: center;
+
+        }
+
+
+        .tech {
+
+            display: inline-block;
+
+            padding: 8px 12px;
+
+            margin: 4px;
+
+            border-radius: 8px;
+
+            background: #172554;
+
+            border:
+                1px solid #29428a;
+
+            color: #bfdbfe;
+
+            font-size: 12px;
+
+            font-weight: bold;
+
+        }
+
+
+        .pipeline {
+
+            max-width: 850px;
+
+            margin: 45px auto;
+
+        }
+
+
+        .pipeline-card {
+
+            background: #0f1b2d;
+
+            border:
+                1px solid #243247;
+
+            border-radius: 18px;
+
+            padding: 25px;
+
+        }
+
+
+        .pipeline-item {
+
+            padding: 15px;
+
+            color: #cbd5e1;
+
+        }
+
+
+        .pipeline-item i {
+
+            display: block;
+
+            font-size: 25px;
+
+            color: #22d3ee;
+
+            margin-bottom: 8px;
+
+        }
+
+
+        .disclaimer {
+
+            max-width: 700px;
+
+            margin: 30px auto;
+
+            padding: 15px;
+
+            background: #291f0b;
+
+            border:
+                1px solid #5b4311;
+
+            border-radius: 10px;
+
+            color: #fcd34d;
+
+            font-size: 12px;
+
+            line-height: 1.6;
+
+        }
+
+
+        footer {
+
+            text-align: center;
+
+            padding: 30px;
+
+            color: #64748b;
+
+            font-size: 12px;
+
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+
+<!-- NAVBAR -->
+
+<nav class="navbar-custom">
+
+    <div class="container">
+
+        <div class="brand">
+
+            <span class="brand-icon">
+
+                <i class="bi bi-activity"></i>
+
+            </span>
+
+            LungVision AI
+
+        </div>
+
+    </div>
+
+</nav>
+
+
+<!-- HERO -->
+
+<section class="hero">
+
+    <div class="container">
+
+        <span class="badge-ai">
+
+            <i class="bi bi-cpu"></i>
+
+            DEEP LEARNING COMPUTER VISION
+
+        </span>
+
+
+        <h1>
+
+            LungVision AI
+
+        </h1>
+
+
+        <p>
+
+            Upload a JPEG CT scan and analyze it
+            using an end-to-end deep learning pipeline.
+
+        </p>
+
+    </div>
+
+</section>
+
+
+<!-- UPLOAD -->
+
+<div class="container">
+
+    <div class="upload-card">
+
+
+        <form
+            action="/predict"
+            method="POST"
+            enctype="multipart/form-data"
+        >
+
+
+            <div class="upload-area">
+
+
+                <div class="upload-icon">
+
+                    <i class="bi bi-cloud-arrow-up"></i>
+
+                </div>
+
+
+                <h3>
+
+                    Upload CT Scan
+
+                </h3>
+
+
+                <p class="text-secondary">
+
+                    Supported format:
+                    JPG / JPEG
+
+                </p>
+
+
+                <input
+                    type="file"
+                    id="fileInput"
+                    name="image"
+                    accept=".jpg,.jpeg"
+                    class="form-control mt-4"
+                    required
+                >
+
+
+                <div class="text-center mt-4">
+
+                    <img
+                        id="imagePreview"
+                        style="
+                            display: none;
+                            max-width: 300px;
+                            max-height: 300px;
+                        "
+                        class="img-thumbnail"
+                        alt="CT Scan Preview"
+                    >
+
+                </div>
+
+
+            </div>
+
+
+            <button
+                type="submit"
+                class="btn-analyze"
+            >
+
+                <i class="bi bi-cpu"></i>
+
+                Analyze CT Scan
+
+            </button>
+
+
+        </form>
+
+
+        <!-- TECHNOLOGIES -->
+
+        <div class="tech-section">
+
+            <div class="text-secondary mb-2">
+
+                TECHNOLOGY STACK
+
+            </div>
+
+
+            <span class="tech">
+                Python
+            </span>
+
+            <span class="tech">
+                PyTorch
+            </span>
+
+            <span class="tech">
+                U-Net
+            </span>
+
+            <span class="tech">
+                CNN
+            </span>
+
+            <span class="tech">
+                Computer Vision
+            </span>
+
+            <span class="tech">
+                Flask
+            </span>
+
+        </div>
+
+    </div>
+
+
+    <!-- PIPELINE -->
+
+    <div class="pipeline">
+
+        <div class="pipeline-card">
+
+            <h5 class="text-center mb-4">
+
+                End-to-End AI Pipeline
+
+            </h5>
+
+
+            <div class="row text-center">
+
+                <div class="col-md-3">
+
+                    <div class="pipeline-item">
+
+                        <i class="bi bi-upload"></i>
+
+                        Image Upload
+
+                    </div>
+
+                </div>
+
+
+                <div class="col-md-3">
+
+                    <div class="pipeline-item">
+
+                        <i class="bi bi-image"></i>
+
+                        Preprocessing
+
+                    </div>
+
+                </div>
+
+
+                <div class="col-md-3">
+
+                    <div class="pipeline-item">
+
+                        <i class="bi bi-bounding-box"></i>
+
+                        U-Net ROI
+
+                    </div>
+
+                </div>
+
+
+                <div class="col-md-3">
+
+                    <div class="pipeline-item">
+
+                        <i class="bi bi-cpu"></i>
+
+                        CNN Classification
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- DISCLAIMER -->
+
+    <div class="disclaimer">
+
+        <strong>
+
+            <i class="bi bi-exclamation-triangle"></i>
+
+            Important:
+
+        </strong>
+
+        This application is an AI/ML project prototype
+        developed for educational and research purposes.
+        It is not a medical diagnosis and should not replace
+        evaluation by a qualified healthcare professional.
+
+    </div>
+
+</div>
+
+
+<footer>
+
+    AI Lung Analysis • Deep Learning • Flask Deployment
+
+</footer>
+
+
+<script>
+
+document
+    .getElementById("fileInput")
+    .addEventListener(
+        "change",
+        function(event) {
+
+            const file =
+                event.target.files[0];
+
+            const preview =
+                document.getElementById(
+                    "imagePreview"
+                );
+
+
+            if (file) {
+
+                const reader =
+                    new FileReader();
+
+
+                reader.onload =
+                    function(e) {
+
+                        preview.src =
+                            e.target.result;
+
+                        preview.style.display =
+                            "block";
+
+                    };
+
+
+                reader.readAsDataURL(
+                    file
+                );
+
+            }
+
+            else {
+
+                preview.style.display =
+                    "none";
+
+            }
+
+        }
+    );
+
+</script>
+
+
+</body>
+
+</html>
