@@ -32,7 +32,11 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # DEVICE
 # ============================================================
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Render deployment uses CPU
+device = torch.device("cpu")
+
+# Reduce CPU usage and memory usage
+torch.set_num_threads(1)
 
 print("Using device:", device)
 
@@ -44,6 +48,7 @@ print("Using device:", device)
 class RS_CapsNet(nn.Module):
 
     def __init__(self, num_classes=3):
+
         super().__init__()
 
         self.conv1 = nn.Conv2d(
@@ -60,7 +65,10 @@ class RS_CapsNet(nn.Module):
             padding=1
         )
 
-        self.pool = nn.MaxPool2d(2, 2)
+        self.pool = nn.MaxPool2d(
+            2,
+            2
+        )
 
         self.relu = nn.ReLU()
 
@@ -84,7 +92,10 @@ class RS_CapsNet(nn.Module):
         x = self.relu(x)
         x = self.pool(x)
 
-        x = x.view(x.size(0), -1)
+        x = x.view(
+            x.size(0),
+            -1
+        )
 
         x = self.fc1(x)
         x = self.relu(x)
@@ -99,11 +110,17 @@ class RS_CapsNet(nn.Module):
 # ============================================================
 
 if not os.path.exists(CLASS_PATH):
+
     raise FileNotFoundError(
         "models/classes.txt not found."
     )
 
-with open(CLASS_PATH, "r", encoding="utf-8") as file:
+
+with open(
+    CLASS_PATH,
+    "r",
+    encoding="utf-8"
+) as file:
 
     class_names = [
         line.strip()
@@ -111,7 +128,18 @@ with open(CLASS_PATH, "r", encoding="utf-8") as file:
         if line.strip()
     ]
 
-print("Classes:", class_names)
+
+if not class_names:
+
+    raise ValueError(
+        "No class names found in models/classes.txt"
+    )
+
+
+print(
+    "Classes:",
+    class_names
+)
 
 
 # ============================================================
@@ -119,24 +147,29 @@ print("Classes:", class_names)
 # ============================================================
 
 if not os.path.exists(MODEL_PATH):
+
     raise FileNotFoundError(
         "models/RS_CapsNet.pth not found."
     )
+
 
 model = RS_CapsNet(
     num_classes=len(class_names)
 )
 
+
 model.load_state_dict(
     torch.load(
         MODEL_PATH,
-        map_location=device
+        map_location="cpu"
     )
 )
 
-model = model.to(device)
+
+model = model.to("cpu")
 
 model.eval()
+
 
 print("Model loaded successfully.")
 
@@ -146,9 +179,17 @@ print("Model loaded successfully.")
 # ============================================================
 
 transform = transforms.Compose([
-    transforms.Resize((128, 128)),
-    transforms.Grayscale(num_output_channels=1),
+
+    transforms.Resize(
+        (128, 128)
+    ),
+
+    transforms.Grayscale(
+        num_output_channels=1
+    ),
+
     transforms.ToTensor(),
+
     transforms.Normalize(
         (0.5,),
         (0.5,)
@@ -163,90 +204,111 @@ transform = transforms.Compose([
 @app.route("/")
 def index():
 
-    return render_template("index.html")
+    return render_template(
+        "index.html"
+    )
 
 
 # ============================================================
 # PREDICTION PAGE + PREDICTION
 # ============================================================
 
-@app.route("/predict", methods=["GET", "POST"])
+@app.route(
+    "/predict",
+    methods=["GET", "POST"]
+)
 def predict():
 
-    # --------------------------------------------------------
+    # ========================================================
     # GET REQUEST
-    # Open prediction page
-    # --------------------------------------------------------
+    # ========================================================
 
     if request.method == "GET":
 
-        return render_template("predict.html")
+        return render_template(
+            "predict.html"
+        )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # POST REQUEST
-    # Process uploaded image
-    # --------------------------------------------------------
+    # ========================================================
 
-    if "image" not in request.files:
-
-        return jsonify({
-            "error": "No image uploaded"
-        }), 400
-
-
-    file = request.files["image"]
-
-
-    # --------------------------------------------------------
-    # Check filename
-    # --------------------------------------------------------
-
-    if file.filename == "":
-
-        return jsonify({
-            "error": "Empty filename"
-        }), 400
-
-
-    # --------------------------------------------------------
-    # Check file extension
-    # --------------------------------------------------------
-
-    if not file.filename.lower().endswith(
-        (".jpg", ".jpeg")
-    ):
-
-        return jsonify({
-            "error": "Only JPEG images (.jpg/.jpeg) are allowed."
-        }), 400
-
-
-    # --------------------------------------------------------
-    # Generate unique filename
-    # --------------------------------------------------------
-
-    filename = (
-        uuid.uuid4().hex
-        + "_"
-        + file.filename
-    )
-
-
-    filepath = os.path.join(
-        UPLOAD_FOLDER,
-        filename
-    )
-
-
-    # --------------------------------------------------------
-    # Save image
-    # --------------------------------------------------------
-
-    file.save(filepath)
-
+    filepath = None
 
     try:
+
+        # ----------------------------------------------------
+        # Check uploaded image
+        # ----------------------------------------------------
+
+        if "image" not in request.files:
+
+            return jsonify({
+                "error": "No image uploaded."
+            }), 400
+
+
+        file = request.files["image"]
+
+
+        # ----------------------------------------------------
+        # Check filename
+        # ----------------------------------------------------
+
+        if not file.filename:
+
+            return jsonify({
+                "error": "No file selected."
+            }), 400
+
+
+        # ----------------------------------------------------
+        # Check file extension
+        # ----------------------------------------------------
+
+        original_filename = file.filename.lower()
+
+
+        if not original_filename.endswith(
+            (".jpg", ".jpeg")
+        ):
+
+            return jsonify({
+                "error":
+                "Only JPG and JPEG images are allowed."
+            }), 400
+
+
+        # ----------------------------------------------------
+        # Generate unique filename
+        # ----------------------------------------------------
+
+        filename = (
+            uuid.uuid4().hex
+            + "_"
+            + os.path.basename(file.filename)
+        )
+
+
+        filepath = os.path.join(
+            UPLOAD_FOLDER,
+            filename
+        )
+
+
+        # ----------------------------------------------------
+        # Save image
+        # ----------------------------------------------------
+
+        file.save(filepath)
+
+
+        print(
+            "Image saved:",
+            filepath
+        )
+
 
         # ----------------------------------------------------
         # Open image
@@ -261,28 +323,34 @@ def predict():
         # Transform image
         # ----------------------------------------------------
 
-        input_tensor = transform(image)
+        input_tensor = transform(
+            image
+        )
 
 
         # ----------------------------------------------------
         # Add batch dimension
         # ----------------------------------------------------
 
-        input_tensor = input_tensor.unsqueeze(0)
+        input_tensor = input_tensor.unsqueeze(
+            0
+        )
 
 
         # ----------------------------------------------------
-        # Move to device
+        # Move to CPU
         # ----------------------------------------------------
 
-        input_tensor = input_tensor.to(device)
+        input_tensor = input_tensor.to(
+            device
+        )
 
 
-        # ----------------------------------------------------
-        # Prediction
-        # ----------------------------------------------------
+        # ====================================================
+        # MODEL PREDICTION
+        # ====================================================
 
-        with torch.no_grad():
+        with torch.inference_mode():
 
             output = model(
                 input_tensor
@@ -295,7 +363,7 @@ def predict():
 
 
         # ----------------------------------------------------
-        # Predicted class
+        # Get predicted class
         # ----------------------------------------------------
 
         predicted_index = int(
@@ -323,7 +391,7 @@ def predict():
 
 
         # ----------------------------------------------------
-        # All probabilities
+        # All class probabilities
         # ----------------------------------------------------
 
         probs = []
@@ -333,32 +401,91 @@ def predict():
         ):
 
             probs.append({
-                "name": class_names[i],
-                "prob": float(
-                    probabilities[i].item()
+
+                "name":
+                class_names[i],
+
+                "prob":
+                round(
+                    float(
+                        probabilities[i].item()
+                    ),
+                    4
                 )
+
             })
 
 
-        # ----------------------------------------------------
-        # Result page
-        # ----------------------------------------------------
+        print(
+            "Prediction:",
+            predicted_class
+        )
+
+        print(
+            "Confidence:",
+            confidence
+        )
+
+
+        # ====================================================
+        # RESULT PAGE
+        # ====================================================
 
         return render_template(
+
             "result.html",
-            predicted_class=predicted_class,
-            confidence=confidence,
-            probs=probs
+
+            predicted_class=
+            predicted_class,
+
+            confidence=
+            confidence,
+
+            probs=
+            probs
         )
 
 
     except Exception as e:
 
-        print("Prediction error:", str(e))
+        print(
+            "Prediction error:",
+            repr(e)
+        )
 
         return jsonify({
-            "error": str(e)
+
+            "error":
+            "Prediction failed.",
+
+            "details":
+            str(e)
+
         }), 500
+
+
+    finally:
+
+        # ====================================================
+        # DELETE TEMPORARY UPLOADED IMAGE
+        # ====================================================
+
+        if filepath and os.path.exists(filepath):
+
+            try:
+
+                os.remove(filepath)
+
+                print(
+                    "Temporary image removed."
+                )
+
+            except Exception as cleanup_error:
+
+                print(
+                    "Could not remove temporary image:",
+                    cleanup_error
+                )
 
 
 # ============================================================
@@ -369,9 +496,19 @@ def predict():
 def health():
 
     return jsonify({
-        "status": "healthy",
-        "model": "loaded",
-        "classes": class_names
+
+        "status":
+        "healthy",
+
+        "model":
+        "loaded",
+
+        "device":
+        str(device),
+
+        "classes":
+        class_names
+
     })
 
 
@@ -382,7 +519,11 @@ def health():
 if __name__ == "__main__":
 
     app.run(
+
         host="0.0.0.0",
+
         port=5000,
+
         debug=True
+
     )
