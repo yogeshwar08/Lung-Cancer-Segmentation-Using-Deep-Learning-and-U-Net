@@ -10,46 +10,40 @@ from PIL import Image
 from flask import Flask, render_template, request, jsonify
 
 
-# ==================================================
+# ============================================================
 # FLASK APP
-# ==================================================
+# ============================================================
 
 app = Flask(__name__)
 
 
-# ==================================================
+# ============================================================
 # SETTINGS
-# ==================================================
+# ============================================================
 
 UPLOAD_FOLDER = "static/uploads"
 MODEL_PATH = "models/RS_CapsNet.pth"
 CLASS_PATH = "models/classes.txt"
 
-os.makedirs(
-    UPLOAD_FOLDER,
-    exist_ok=True
-)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# ==================================================
+# ============================================================
 # DEVICE
-# ==================================================
+# ============================================================
 
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("Using device:", device)
 
 
-# ==================================================
+# ============================================================
 # MODEL
-# ==================================================
+# ============================================================
 
 class RS_CapsNet(nn.Module):
 
     def __init__(self, num_classes=3):
-
         super().__init__()
 
         self.conv1 = nn.Conv2d(
@@ -66,10 +60,7 @@ class RS_CapsNet(nn.Module):
             padding=1
         )
 
-        self.pool = nn.MaxPool2d(
-            2,
-            2
-        )
+        self.pool = nn.MaxPool2d(2, 2)
 
         self.relu = nn.ReLU()
 
@@ -86,24 +77,16 @@ class RS_CapsNet(nn.Module):
     def forward(self, x):
 
         x = self.conv1(x)
-
         x = self.relu(x)
-
         x = self.pool(x)
 
         x = self.conv2(x)
-
         x = self.relu(x)
-
         x = self.pool(x)
 
-        x = x.view(
-            x.size(0),
-            -1
-        )
+        x = x.view(x.size(0), -1)
 
         x = self.fc1(x)
-
         x = self.relu(x)
 
         x = self.fc2(x)
@@ -111,23 +94,16 @@ class RS_CapsNet(nn.Module):
         return x
 
 
-# ==================================================
+# ============================================================
 # LOAD CLASS NAMES
-# ==================================================
+# ============================================================
 
 if not os.path.exists(CLASS_PATH):
-
     raise FileNotFoundError(
-        "models/classes.txt not found. "
-        "Run classify.py first."
+        "models/classes.txt not found."
     )
 
-
-with open(
-    CLASS_PATH,
-    "r",
-    encoding="utf-8"
-) as file:
+with open(CLASS_PATH, "r", encoding="utf-8") as file:
 
     class_names = [
         line.strip()
@@ -135,24 +111,17 @@ with open(
         if line.strip()
     ]
 
-
-print(
-    "Classes:",
-    class_names
-)
+print("Classes:", class_names)
 
 
-# ==================================================
+# ============================================================
 # LOAD MODEL
-# ==================================================
+# ============================================================
 
 if not os.path.exists(MODEL_PATH):
-
     raise FileNotFoundError(
-        "models/RS_CapsNet.pth not found. "
-        "Run classify.py first."
+        "models/RS_CapsNet.pth not found."
     )
-
 
 model = RS_CapsNet(
     num_classes=len(class_names)
@@ -172,53 +141,53 @@ model.eval()
 print("Model loaded successfully.")
 
 
-# ==================================================
+# ============================================================
 # IMAGE TRANSFORMATION
-# ==================================================
+# ============================================================
 
-transform = transforms.Compose(
-    [
-        transforms.Resize(
-            (128, 128)
-        ),
-
-        transforms.Grayscale(
-            num_output_channels=1
-        ),
-
-        transforms.ToTensor(),
-
-        transforms.Normalize(
-            (0.5,),
-            (0.5,)
-        )
-    ]
-)
+transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.Grayscale(num_output_channels=1),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        (0.5,),
+        (0.5,)
+    )
+])
 
 
-# ==================================================
+# ============================================================
 # HOME PAGE
-# ==================================================
+# ============================================================
 
 @app.route("/")
 def index():
 
-    return render_template(
-        "index.html"
-    )
+    return render_template("index.html")
 
 
-# ==================================================
-# PREDICTION
-# ==================================================
+# ============================================================
+# PREDICTION PAGE + PREDICTION
+# ============================================================
 
-@app.route(
-    "/predict",
-    methods=["POST"]
-)
+@app.route("/predict", methods=["GET", "POST"])
 def predict():
 
-    # Check image
+    # --------------------------------------------------------
+    # GET REQUEST
+    # Open prediction page
+    # --------------------------------------------------------
+
+    if request.method == "GET":
+
+        return render_template("predict.html")
+
+
+    # --------------------------------------------------------
+    # POST REQUEST
+    # Process uploaded image
+    # --------------------------------------------------------
+
     if "image" not in request.files:
 
         return jsonify({
@@ -229,7 +198,10 @@ def predict():
     file = request.files["image"]
 
 
+    # --------------------------------------------------------
     # Check filename
+    # --------------------------------------------------------
+
     if file.filename == "":
 
         return jsonify({
@@ -237,18 +209,23 @@ def predict():
         }), 400
 
 
-    # JPEG ONLY
+    # --------------------------------------------------------
+    # Check file extension
+    # --------------------------------------------------------
+
     if not file.filename.lower().endswith(
         (".jpg", ".jpeg")
     ):
 
         return jsonify({
-            "error":
-            "Only JPEG images (.jpg/.jpeg) are allowed."
+            "error": "Only JPEG images (.jpg/.jpeg) are allowed."
         }), 400
 
 
-    # Create unique filename
+    # --------------------------------------------------------
+    # Generate unique filename
+    # --------------------------------------------------------
+
     filename = (
         uuid.uuid4().hex
         + "_"
@@ -262,43 +239,54 @@ def predict():
     )
 
 
-    # Save uploaded image
+    # --------------------------------------------------------
+    # Save image
+    # --------------------------------------------------------
+
     file.save(filepath)
 
 
     try:
 
+        # ----------------------------------------------------
         # Open image
+        # ----------------------------------------------------
+
         image = Image.open(
             filepath
         ).convert("L")
 
 
+        # ----------------------------------------------------
         # Transform image
-        input_tensor = transform(
-            image
-        )
+        # ----------------------------------------------------
+
+        input_tensor = transform(image)
 
 
+        # ----------------------------------------------------
         # Add batch dimension
-        input_tensor = input_tensor.unsqueeze(
-            0
-        )
+        # ----------------------------------------------------
+
+        input_tensor = input_tensor.unsqueeze(0)
 
 
-        # Move to CPU/GPU
-        input_tensor = input_tensor.to(
-            device
-        )
+        # ----------------------------------------------------
+        # Move to device
+        # ----------------------------------------------------
+
+        input_tensor = input_tensor.to(device)
 
 
+        # ----------------------------------------------------
         # Prediction
+        # ----------------------------------------------------
+
         with torch.no_grad():
 
             output = model(
                 input_tensor
             )
-
 
             probabilities = torch.softmax(
                 output,
@@ -306,20 +294,24 @@ def predict():
             )[0]
 
 
-        # Get predicted class
+        # ----------------------------------------------------
+        # Predicted class
+        # ----------------------------------------------------
+
         predicted_index = int(
             probabilities.argmax().item()
         )
 
 
-        predicted_class = (
-            class_names[
-                predicted_index
-            ]
-        )
+        predicted_class = class_names[
+            predicted_index
+        ]
 
 
+        # ----------------------------------------------------
         # Confidence
+        # ----------------------------------------------------
+
         confidence = (
             float(
                 probabilities[
@@ -330,7 +322,10 @@ def predict():
         )
 
 
+        # ----------------------------------------------------
         # All probabilities
+        # ----------------------------------------------------
+
         probs = []
 
         for i in range(
@@ -338,48 +333,56 @@ def predict():
         ):
 
             probs.append({
-
-                "name":
-                class_names[i],
-
-                "prob":
-                float(
+                "name": class_names[i],
+                "prob": float(
                     probabilities[i].item()
                 )
-
             })
 
 
-        # Send result page
+        # ----------------------------------------------------
+        # Result page
+        # ----------------------------------------------------
+
         return render_template(
             "result.html",
-
-            predicted_class=
-            predicted_class,
-
-            confidence=
-            confidence,
-
-            probs=
-            probs
+            predicted_class=predicted_class,
+            confidence=confidence,
+            probs=probs
         )
 
 
     except Exception as e:
+
+        print("Prediction error:", str(e))
 
         return jsonify({
             "error": str(e)
         }), 500
 
 
-# ==================================================
-# RUN FLASK
-# ==================================================
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    return jsonify({
+        "status": "healthy",
+        "model": "loaded",
+        "classes": class_names
+    })
+
+
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
 
 if __name__ == "__main__":
 
     app.run(
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=5000,
         debug=True
     )
