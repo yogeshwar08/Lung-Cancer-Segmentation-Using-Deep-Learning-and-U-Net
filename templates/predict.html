@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,25 +8,102 @@
     <title>Lung Cancer Prediction</title>
 
     <style>
+        * {
+            box-sizing: border-box;
+        }
+
         body {
+            margin: 0;
+            min-height: 100vh;
             font-family: Arial, sans-serif;
-            text-align: center;
-            margin-top: 80px;
+            background: #0f1d32;
+            color: white;
         }
 
         .container {
-            width: 500px;
-            max-width: 90%;
-            margin: auto;
+            width: 90%;
+            max-width: 850px;
+            margin: 35px auto;
+            text-align: center;
         }
 
-        input {
-            margin: 20px;
+        .upload-box {
+            border: 2px dashed #2374ff;
+            border-radius: 20px;
+            padding: 55px 45px;
+            background: #13233b;
         }
 
-        button {
-            padding: 12px 25px;
+        .upload-icon {
+            font-size: 55px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 34px;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #9ca8b8;
+            font-size: 18px;
+            margin-bottom: 30px;
+        }
+
+        .file-box {
+            display: flex;
+            align-items: center;
+            background: #142238;
+            border: 1px solid #34445c;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 30px;
+        }
+
+        input[type="file"] {
+            width: 100%;
+            color: white;
+        }
+
+        .preview-container {
+            display: none;
+            margin: 20px auto 35px;
+        }
+
+        .preview-container img {
+            max-width: 370px;
+            max-height: 320px;
+            border-radius: 8px;
+            border: 3px solid white;
+            object-fit: contain;
+        }
+
+        .predict-button {
+            width: 100%;
+            padding: 17px;
+            border: none;
+            border-radius: 12px;
+            background: linear-gradient(90deg, #246bff, #12c8e9);
+            color: white;
+            font-size: 20px;
+            font-weight: bold;
             cursor: pointer;
+        }
+
+        .predict-button:hover {
+            opacity: 0.9;
+        }
+
+        .predict-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .back {
+            display: inline-block;
+            margin-top: 25px;
+            color: #8fa5c2;
+            text-decoration: none;
         }
     </style>
 </head>
@@ -34,28 +112,142 @@
 
 <div class="container">
 
-    <h1>Lung Cancer Prediction</h1>
+    <div class="upload-box">
 
-    <p>Upload a JPEG chest/lung image for prediction.</p>
+        <div class="upload-icon">☁️</div>
 
-    <form action="/predict" method="POST" enctype="multipart/form-data">
+        <h1>Upload CT Scan</h1>
 
-        <input
-            type="file"
-            name="image"
-            accept=".jpg,.jpeg"
-            required
+        <div class="subtitle">
+            Supported format: JPG / JPEG
+        </div>
+
+        <!-- IMPORTANT: Flask expects name="image" -->
+        <form
+            action="/predict"
+            method="POST"
+            enctype="multipart/form-data"
         >
 
-        <br>
+            <div class="file-box">
 
-        <button type="submit">
-            Predict
-        </button>
+                <input
+                    type="file"
+                    id="image"
+                    name="image"
+                    accept=".jpg,.jpeg"
+                    required
+                    onchange="previewImage(event)"
+                >
 
-    </form>
+            </div>
+
+            <!-- Image Preview -->
+
+            <div
+                class="preview-container"
+                id="previewContainer"
+            >
+
+                <img
+                    id="preview"
+                    src=""
+                    alt="CT Scan Preview"
+                >
+
+            </div>
+
+            <button
+                type="submit"
+                class="predict-button"
+                id="predictButton"
+                disabled
+            >
+                🔬 Analyze CT Scan
+            </button>
+
+        </form>
+
+    </div>
+
+    <a
+        href="/"
+        class="back"
+    >
+        ← Back to Home
+    </a>
 
 </div>
 
+
+<script>
+
+function previewImage(event) {
+
+    const file = event.target.files[0];
+
+    const preview = document.getElementById("preview");
+
+    const previewContainer =
+        document.getElementById("previewContainer");
+
+    const predictButton =
+        document.getElementById("predictButton");
+
+
+    if (!file) {
+
+        previewContainer.style.display = "none";
+
+        predictButton.disabled = true;
+
+        return;
+    }
+
+
+    // Check file type
+
+    const allowedTypes = [
+        "image/jpeg"
+    ];
+
+
+    if (!allowedTypes.includes(file.type)) {
+
+        alert("Please upload a JPG or JPEG image.");
+
+        event.target.value = "";
+
+        previewContainer.style.display = "none";
+
+        predictButton.disabled = true;
+
+        return;
+    }
+
+
+    // Create image preview
+
+    const reader = new FileReader();
+
+
+    reader.onload = function(e) {
+
+        preview.src = e.target.result;
+
+        previewContainer.style.display = "block";
+
+        predictButton.disabled = false;
+
+    };
+
+
+    reader.readAsDataURL(file);
+
+}
+
+</script>
+
 </body>
+
 </html>
