@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Lung Cancer Prediction</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 80px;
+        }
+
+        .container {
+            width: 500px;
+            max-width: 90%;
+            margin: auto;
+        }
+
+        input {
+            margin: 20px;
+        }
+
+        button {
+            padding: 12px 25px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>Lung Cancer Prediction</h1>
+
+    <p>Upload a JPEG chest/lung image for prediction.</p>
+
+    <form action="/predict" method="POST" enctype="multipart/form-data">
+
+        <input
+            type="file"
+            name="image"
+            accept=".jpg,.jpeg"
+            required
+        >
+
+        <br>
+
+        <button type="submit">
+            Predict
+        </button>
+
+    </form>
+
+</div>
+
+</body>
+</html>
