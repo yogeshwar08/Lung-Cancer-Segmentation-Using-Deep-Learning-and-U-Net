@@ -15,7 +15,7 @@ os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 
 import cv2
-import numpy as np
+import numpy as npgit 
 import torch
 import torch.nn as nn
 from torchvision import transforms
