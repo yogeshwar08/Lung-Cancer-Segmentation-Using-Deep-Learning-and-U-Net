@@ -2,8 +2,6 @@ import os
 import gc
 import uuid
 
-import os
-
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
@@ -15,7 +13,7 @@ os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 
 import cv2
-import numpy as npgit 
+import numpy as np 
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -146,6 +144,9 @@ def load_unet():
         compile=False
     )
 
+    if _unet is None:
+        raise RuntimeError("U-Net model loaded as None.")
+
     print("U-Net loaded for prediction.")
     return _unet
 
@@ -208,7 +209,16 @@ def looks_like_lung_ct(image_bgr):
 # U-Net segmentation
 # -----------------------------
 def get_lung_roi(image_bgr):
+    import time
+
+    t0 = time.perf_counter()
     unet = load_unet()
+    load_time = time.perf_counter() - t0
+
+    if unet is None or not hasattr(unet, "predict"):
+        raise RuntimeError("U-Net model is not available for prediction.")
+
+    print(f"U-Net ready in {load_time:.2f}s")
 
     resized = cv2.resize(
         image_bgr,
@@ -219,7 +229,9 @@ def get_lung_roi(image_bgr):
     inp = resized.astype(np.float32) / 255.0
     inp = np.expand_dims(inp, axis=0)
 
+    t1 = time.perf_counter()
     pred = unet.predict(inp, verbose=0)[0, :, :, 0]
+    print(f"U-Net inference: {time.perf_counter() - t1:.2f}s")
 
     del inp, resized
 
@@ -311,6 +323,8 @@ def predict():
         return render_template("predict.html")
 
     filepath = None
+    import time
+    request_start = time.perf_counter()
 
     try:
         if "image" not in request.files:
@@ -390,6 +404,11 @@ def predict():
                 )
             )
 
+        print(
+            f"Total prediction time: "
+            f"{time.perf_counter() - request_start:.2f}s"
+        )
+
         return render_template(
             "result.html",
             predicted_class=predicted_class,
@@ -412,15 +431,18 @@ def predict():
             except Exception as cleanup_error:
                 print("Could not remove temporary image:", cleanup_error)
 
-        # Release temporary TensorFlow memory after every prediction.
-        unload_unet()
+        # Local development: keep U-Net cached so the next prediction is fast.
+        # Render: release it after each request to reduce memory pressure.
+        if os.environ.get("RENDER") == "true":
+            unload_unet()
 
 
 @app.route("/health")
 def health():
     return jsonify({
         "status": "healthy",
-        "model": "loaded",
+        "classifier": "loaded",
+        "unet_loaded": _unet is not None,
         "device": str(device),
         "classes": class_names
     })
