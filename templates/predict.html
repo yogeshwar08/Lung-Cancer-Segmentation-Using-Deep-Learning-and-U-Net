@@ -99,11 +99,63 @@
             cursor: not-allowed;
         }
 
+        /* Loading section */
+        .loading-container {
+            display: none;
+            margin-top: 25px;
+            padding: 25px;
+            border-radius: 12px;
+            background: #102b4a;
+            border: 1px solid #2374ff;
+        }
+
+        .spinner {
+            width: 45px;
+            height: 45px;
+            border: 5px solid #34445c;
+            border-top: 5px solid #12c8e9;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loading-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .loading-text {
+            color: #9ca8b8;
+            font-size: 15px;
+            line-height: 1.5;
+        }
+
+        .warning {
+            color: #ffd166;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
         .back {
             display: inline-block;
             margin-top: 25px;
             color: #8fa5c2;
             text-decoration: none;
+        }
+
+        .back:hover {
+            color: white;
         }
     </style>
 </head>
@@ -122,8 +174,8 @@
             Supported format: JPG / JPEG
         </div>
 
-        <!-- IMPORTANT: Flask expects name="image" -->
         <form
+            id="predictionForm"
             action="/predict"
             method="POST"
             enctype="multipart/form-data"
@@ -135,7 +187,7 @@
                     type="file"
                     id="image"
                     name="image"
-                    accept=".jpg,.jpeg"
+                    accept=".jpg,.jpeg,image/jpeg"
                     required
                     onchange="previewImage(event)"
                 >
@@ -157,6 +209,8 @@
 
             </div>
 
+            <!-- Predict Button -->
+
             <button
                 type="submit"
                 class="predict-button"
@@ -168,11 +222,38 @@
 
         </form>
 
+        <!-- Loading -->
+
+        <div
+            class="loading-container"
+            id="loadingContainer"
+        >
+
+            <div class="spinner"></div>
+
+            <div class="loading-title">
+                🔄 Analyzing CT Scan...
+            </div>
+
+            <div class="loading-text">
+                Please wait while the AI model processes your image.
+                <br>
+                Lung segmentation and classification are in progress.
+            </div>
+
+            <div class="warning">
+                ⏳ This may take 1–3 minutes on the deployed server.
+                Please do not refresh the page.
+            </div>
+
+        </div>
+
     </div>
 
     <a
         href="/"
         class="back"
+        id="backLink"
     >
         ← Back to Home
     </a>
@@ -186,7 +267,8 @@ function previewImage(event) {
 
     const file = event.target.files[0];
 
-    const preview = document.getElementById("preview");
+    const preview =
+        document.getElementById("preview");
 
     const previewContainer =
         document.getElementById("previewContainer");
@@ -226,6 +308,25 @@ function previewImage(event) {
     }
 
 
+    // Check file size
+    // 10 MB maximum
+
+    const maxSize = 10 * 1024 * 1024;
+
+    if (file.size > maxSize) {
+
+        alert("Image size must be less than 10 MB.");
+
+        event.target.value = "";
+
+        previewContainer.style.display = "none";
+
+        predictButton.disabled = true;
+
+        return;
+    }
+
+
     // Create image preview
 
     const reader = new FileReader();
@@ -245,6 +346,49 @@ function previewImage(event) {
     reader.readAsDataURL(file);
 
 }
+
+
+// ============================================================
+// SUBMIT FORM
+// ============================================================
+
+document
+    .getElementById("predictionForm")
+    .addEventListener("submit", function() {
+
+        const predictButton =
+            document.getElementById("predictButton");
+
+        const loadingContainer =
+            document.getElementById("loadingContainer");
+
+        const backLink =
+            document.getElementById("backLink");
+
+
+        // Disable button so user cannot submit twice
+
+        predictButton.disabled = true;
+
+        predictButton.innerHTML =
+            "⏳ Processing...";
+
+
+        // Show loading animation
+
+        loadingContainer.style.display =
+            "block";
+
+
+        // Prevent going back while processing
+
+        backLink.style.pointerEvents =
+            "none";
+
+        backLink.style.opacity =
+            "0.5";
+
+    });
 
 </script>
 
