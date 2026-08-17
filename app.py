@@ -1,13 +1,21 @@
+import gc
 import io
 import logging
 import os
 from pathlib import Path
+
+# Low-memory CPU configuration must be set before TensorFlow import.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
 
 import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image, UnidentifiedImageError
 from flask import Flask, jsonify, render_template, request
+import tensorflow as tf
 from tensorflow.keras.models import load_model
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
@@ -29,6 +37,18 @@ MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
 
 IMAGE_SIZE = (256, 256)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Force TensorFlow to CPU and keep inference thread usage low.
+try:
+    tf.config.set_visible_devices([], "GPU")
+except Exception:
+    pass
+
+try:
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+except RuntimeError:
+    pass
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
 
@@ -402,12 +422,29 @@ def load_unet():
         UNET_PATH,
     )
 
-    _unet_model = load_model(
-        UNET_PATH,
-        compile=False,
-    )
+    gc.collect()
 
-    return _unet_model
+    try:
+        _unet_model = load_model(
+            UNET_PATH,
+            compile=False,
+        )
+
+        logger.info(
+            "U-Net model loaded successfully."
+        )
+
+        return _unet_model
+
+    except Exception:
+        logger.exception(
+            "Failed to load U-Net model."
+        )
+
+        _unet_model = None
+        gc.collect()
+
+        raise
 
 
 def load_classifier():
@@ -817,26 +854,34 @@ def predict_page():
 
 @app.route("/health")
 def health():
+    # Keep health checks lightweight; never load ML models here.
     return jsonify(
         {
             "status": "healthy",
             "service": "LungVision AI",
             "device": str(DEVICE),
+            "models_loaded": {
+                "unet": _unet_model is not None,
+                "classifier": _classifier_model is not None,
+            },
         }
     )
 
 
 @app.route("/api/health")
 def api_health():
+    # Check model files without loading them.
     return jsonify(
         {
             "status": "ok",
             "service": "LungVision AI",
             "device": str(DEVICE),
             "models": {
-                "unet": UNET_PATH.exists(),
-                "classifier": CLASSIFIER_PATH.exists(),
-                "classes": CLASSES_PATH.exists(),
+                "unet_file": UNET_PATH.exists(),
+                "classifier_file": CLASSIFIER_PATH.exists(),
+                "classes_file": CLASSES_PATH.exists(),
+                "unet_loaded": _unet_model is not None,
+                "classifier_loaded": _classifier_model is not None,
             },
         }
     )
