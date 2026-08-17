@@ -1,458 +1,1110 @@
+import io
+import logging
 import os
-import gc
-import uuid
+from pathlib import Path
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
-os.environ["TF_NUM_INTEROP_THREADS"] = "1"
-
-import cv2
-import numpy as np 
+import numpy as np
 import torch
 import torch.nn as nn
-from torchvision import transforms
-from PIL import Image
-from flask import Flask, render_template, request, jsonify
+from PIL import Image, UnidentifiedImageError
+from flask import Flask, jsonify, render_template, request
+from tensorflow.keras.models import load_model
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.utils import secure_filename
+
+
+# ============================================================
+# APPLICATION CONFIGURATION
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR / "models"
+
+UNET_PATH = MODEL_DIR / "final_unet.keras"
+CLASSIFIER_PATH = MODEL_DIR / "RS_CapsNet.pth"
+CLASSES_PATH = MODEL_DIR / "classes.txt"
+
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))
+MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
+
+IMAGE_SIZE = (256, 256)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger("lungvision")
+
+
+# ============================================================
+# FLASK APPLICATION
+# ============================================================
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "static/uploads"
-MODEL_PATH = "models/RS_CapsNet.pth"
-CLASS_PATH = "models/classes.txt"
-UNET_PATH = "models/final_unet.keras"
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Render free/small instances: force CPU and keep PyTorch thread count low.
-device = torch.device("cpu")
-torch.set_num_threads(1)
-try:
-    torch.set_num_interop_threads(1)
-except RuntimeError:
-    pass
-
-MIN_CLASS_CONFIDENCE = 60.0
-MIN_LUNG_AREA_RATIO = 0.03
-MAX_LUNG_AREA_RATIO = 0.85
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
 
-class RS_CapsNet(nn.Module):
-    def __init__(self, num_classes=3):
+# ============================================================
+# GLOBAL MODEL CACHE
+# ============================================================
+
+_unet_model = None
+_classifier_model = None
+_class_names = None
+
+
+# ============================================================
+# MODEL ARCHITECTURE
+# ============================================================
+
+class PrimaryCaps(nn.Module):
+    def __init__(self, in_channels, num_capsules, capsule_dim, kernel_size=3):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.relu = nn.ReLU()
-        self.fc1 = nn.Linear(64 * 32 * 32, 128)
-        self.fc2 = nn.Linear(128, num_classes)
+
+        self.conv = nn.Conv2d(
+            in_channels,
+            num_capsules * capsule_dim,
+            kernel_size=kernel_size,
+            stride=2,
+            padding=1,
+        )
+
+        self.num_capsules = num_capsules
+        self.capsule_dim = capsule_dim
 
     def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        return self.fc2(x)
+        x = self.conv(x)
+
+        batch_size, _, height, width = x.shape
+
+        x = x.view(
+            batch_size,
+            self.num_capsules,
+            self.capsule_dim,
+            height,
+            width,
+        )
+
+        x = x.permute(0, 1, 3, 4, 2)
+
+        x = x.contiguous().view(
+            batch_size,
+            self.num_capsules * height * width,
+            self.capsule_dim,
+        )
+
+        return self.squash(x)
+
+    @staticmethod
+    def squash(x):
+        norm_squared = (x ** 2).sum(dim=-1, keepdim=True)
+
+        scale = norm_squared / (1 + norm_squared)
+
+        return scale * x / torch.sqrt(norm_squared + 1e-8)
 
 
-# -----------------------------
-# Class names
-# -----------------------------
-if not os.path.exists(CLASS_PATH):
-    raise FileNotFoundError(f"{CLASS_PATH} not found.")
+class CapsuleLayer(nn.Module):
+    def __init__(
+        self,
+        input_capsules,
+        input_dim,
+        output_capsules,
+        output_dim,
+        routing_iterations=3,
+    ):
+        super().__init__()
 
-with open(CLASS_PATH, "r", encoding="utf-8") as f:
-    class_names = [line.strip() for line in f if line.strip()]
+        self.input_capsules = input_capsules
+        self.input_dim = input_dim
+        self.output_capsules = output_capsules
+        self.output_dim = output_dim
+        self.routing_iterations = routing_iterations
 
-if not class_names:
-    raise ValueError("No classes found in models/classes.txt.")
+        self.W = nn.Parameter(
+            torch.randn(
+                1,
+                input_capsules,
+                output_capsules,
+                output_dim,
+                input_dim,
+            ) * 0.01
+        )
+
+    def forward(self, x):
+        batch_size = x.size(0)
+
+        W = self.W.expand(
+            batch_size,
+            -1,
+            -1,
+            -1,
+            -1,
+        )
+
+        x = x.unsqueeze(2).unsqueeze(-1)
+
+        u_hat = torch.matmul(W, x).squeeze(-1)
+
+        routing_logits = torch.zeros(
+            batch_size,
+            self.input_capsules,
+            self.output_capsules,
+            device=x.device,
+        )
+
+        for iteration in range(self.routing_iterations):
+
+            routing_coefficients = torch.softmax(
+                routing_logits,
+                dim=-1,
+            )
+
+            s = (
+                routing_coefficients.unsqueeze(-1)
+                * u_hat
+            ).sum(dim=1)
+
+            v = self.squash(s)
+
+            if iteration < self.routing_iterations - 1:
+                agreement = (
+                    u_hat * v.unsqueeze(1)
+                ).sum(dim=-1)
+
+                routing_logits = routing_logits + agreement
+
+        return v
+
+    @staticmethod
+    def squash(x):
+        norm_squared = (x ** 2).sum(dim=-1, keepdim=True)
+
+        scale = norm_squared / (1 + norm_squared)
+
+        return scale * x / torch.sqrt(norm_squared + 1e-8)
 
 
-# -----------------------------
-# Load ONLY PyTorch classifier at startup
-# U-Net is lazy-loaded during prediction to reduce peak startup RAM.
-# -----------------------------
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"{MODEL_PATH} not found.")
+class CapsuleNetwork(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
 
-model = RS_CapsNet(num_classes=len(class_names))
+        self.features = nn.Sequential(
+            nn.Conv2d(
+                1,
+                32,
+                kernel_size=5,
+                stride=1,
+                padding=2,
+            ),
+            nn.ReLU(),
 
-state_dict = torch.load(
-    MODEL_PATH,
-    map_location="cpu",
-    weights_only=True
-)
-model.load_state_dict(state_dict)
-del state_dict
+            nn.BatchNorm2d(32),
 
-model = model.to(device)
-model.eval()
+            nn.Conv2d(
+                32,
+                64,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+            ),
+            nn.ReLU(),
 
-print("Using device:", device)
-print("Classes:", class_names)
-print("RS-CapsNet loaded successfully.")
+            nn.BatchNorm2d(64),
+
+            nn.Conv2d(
+                64,
+                128,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+            ),
+            nn.ReLU(),
+
+            nn.BatchNorm2d(128),
+        )
+
+        self.primary_caps = PrimaryCaps(
+            in_channels=128,
+            num_capsules=8,
+            capsule_dim=16,
+            kernel_size=3,
+        )
+
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+        )
+
+        self.output_layer = nn.Linear(
+            16,
+            num_classes,
+        )
+
+    def forward(self, x):
+
+        x = self.features(x)
+
+        x = self.primary_caps(x)
+
+        x = x.mean(dim=1)
+
+        x = self.classifier(
+            x.unsqueeze(-1)
+        ).squeeze(-1)
+
+        return self.output_layer(x)
 
 
-# Classifier preprocessing must match training.
-classifier_transform = transforms.Compose([
-    transforms.Resize((128, 128)),
-    transforms.Grayscale(num_output_channels=1),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def allowed_file(filename):
+    if not filename or "." not in filename:
+        return False
+
+    extension = filename.rsplit(".", 1)[1].lower()
+
+    return extension in ALLOWED_EXTENSIONS
 
 
-# -----------------------------
-# Lazy U-Net loading
-# -----------------------------
-_unet = None
+def validate_input_image(image):
+    """
+    Basic validation for uploaded CT-style images.
+
+    This is an input-quality gate, not a medical diagnosis.
+    """
+
+    try:
+        width, height = image.size
+
+        if width < 128 or height < 128:
+            return False, (
+                "Please enter a correct lung CT scan image. "
+                "The image resolution is too small."
+            )
+
+        rgb_image = image.convert("RGB")
+        image_array = np.asarray(
+            rgb_image,
+            dtype=np.float32,
+        )
+
+        red = image_array[:, :, 0]
+        green = image_array[:, :, 1]
+        blue = image_array[:, :, 2]
+
+        color_difference = (
+            np.mean(np.abs(red - green))
+            + np.mean(np.abs(green - blue))
+            + np.mean(np.abs(red - blue))
+        ) / 3.0
+
+        if color_difference > 25:
+            return False, (
+                "Please enter a correct lung CT scan image. "
+                "The uploaded image does not appear to be "
+                "a grayscale medical CT image."
+            )
+
+        gray = np.asarray(
+            image.convert("L"),
+            dtype=np.float32,
+        )
+
+        if np.std(gray) < 8:
+            return False, (
+                "Please enter a correct lung CT scan image. "
+                "The uploaded image appears to be blank."
+            )
+
+        if np.max(gray) - np.min(gray) < 15:
+            return False, (
+                "Please enter a correct lung CT scan image."
+            )
+
+        return True, None
+
+    except Exception:
+        logger.exception(
+            "Input image validation failed."
+        )
+
+        return False, (
+            "Unable to validate the uploaded image. "
+            "Please upload a valid lung CT scan."
+        )
+
+
+def load_class_names():
+    global _class_names
+
+    if _class_names is not None:
+        return _class_names
+
+    if not CLASSES_PATH.exists():
+        logger.warning(
+            "classes.txt not found. Using default labels."
+        )
+
+        _class_names = [
+            "Class 0",
+            "Class 1",
+        ]
+
+        return _class_names
+
+    with open(
+        CLASSES_PATH,
+        "r",
+        encoding="utf-8",
+    ) as file:
+
+        classes = [
+            line.strip()
+            for line in file
+            if line.strip()
+        ]
+
+    if not classes:
+        raise RuntimeError(
+            "classes.txt is empty."
+        )
+
+    _class_names = classes
+
+    return _class_names
 
 
 def load_unet():
-    global _unet
+    global _unet_model
 
-    if _unet is not None:
-        return _unet
+    if _unet_model is not None:
+        return _unet_model
 
-    if not os.path.exists(UNET_PATH):
+    if not UNET_PATH.exists():
         raise FileNotFoundError(
-            "models/final_unet.keras not found. "
-            "The U-Net model is required for input validation."
+            f"U-Net model not found: {UNET_PATH}"
         )
 
-    # Import TensorFlow only when prediction actually needs it.
-    import tensorflow as tf
-
-    try:
-        tf.config.set_visible_devices([], "GPU")
-    except Exception:
-        pass
-
-    try:
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-    except Exception:
-        pass
-
-    _unet = tf.keras.models.load_model(
+    logger.info(
+        "Loading U-Net model from %s",
         UNET_PATH,
-        compile=False
     )
 
-    if _unet is None:
-        raise RuntimeError("U-Net model loaded as None.")
+    _unet_model = load_model(
+        UNET_PATH,
+        compile=False,
+    )
 
-    print("U-Net loaded for prediction.")
-    return _unet
-
-
-def unload_unet():
-    global _unet
-
-    if _unet is not None:
-        del _unet
-        _unet = None
-
-    gc.collect()
-
-    try:
-        import tensorflow as tf
-        tf.keras.backend.clear_session()
-    except Exception:
-        pass
+    return _unet_model
 
 
-# -----------------------------
-# Basic input validation
-# -----------------------------
-def looks_like_lung_ct(image_bgr):
-    """
-    Conservative gate for obvious non-CT photographs.
+def load_classifier():
+    global _classifier_model
 
-    This is NOT a medical diagnosis and cannot prove that an image
-    is a CT scan. It only rejects obvious color photographs.
-    """
-    if image_bgr is None or image_bgr.size == 0:
-        return False, "Invalid image."
+    if _classifier_model is not None:
+        return _classifier_model
 
-    h, w = image_bgr.shape[:2]
-
-    if h < 64 or w < 64:
-        return False, "Image is too small."
-
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-
-    # Family photos/selfies are commonly strongly colored.
-    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    saturation = float(np.mean(hsv[:, :, 1]))
-
-    # Keep this conservative because some CT images may have annotations.
-    if saturation > 55:
-        return False, (
-            "This does not look like a grayscale lung CT image. "
-            "Please upload a lung CT JPEG image."
+    if not CLASSIFIER_PATH.exists():
+        raise FileNotFoundError(
+            f"Classifier model not found: {CLASSIFIER_PATH}"
         )
 
-    # Reject almost completely uniform images.
-    if float(np.std(gray)) < 8:
-        return False, "Image has insufficient visual information."
+    classes = load_class_names()
 
-    return True, None
-
-
-# -----------------------------
-# U-Net segmentation
-# -----------------------------
-def get_lung_roi(image_bgr):
-    import time
-
-    t0 = time.perf_counter()
-    unet = load_unet()
-    load_time = time.perf_counter() - t0
-
-    if unet is None or not hasattr(unet, "predict"):
-        raise RuntimeError("U-Net model is not available for prediction.")
-
-    print(f"U-Net ready in {load_time:.2f}s")
-
-    resized = cv2.resize(
-        image_bgr,
-        (256, 256),
-        interpolation=cv2.INTER_AREA
+    logger.info(
+        "Loading classifier model from %s",
+        CLASSIFIER_PATH,
     )
 
-    inp = resized.astype(np.float32) / 255.0
-    inp = np.expand_dims(inp, axis=0)
-
-    t1 = time.perf_counter()
-    pred = unet.predict(inp, verbose=0)[0, :, :, 0]
-    print(f"U-Net inference: {time.perf_counter() - t1:.2f}s")
-
-    del inp, resized
-
-    mask = (pred > 0.5).astype(np.uint8) * 255
-
-    # Clean small noise.
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-    # Find the largest connected region.
-    contours, _ = cv2.findContours(
-        mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
+    model = CapsuleNetwork(
+        num_classes=len(classes)
     )
 
-    if not contours:
-        return None, 0.0
-
-    largest = max(contours, key=cv2.contourArea)
-    area = float(cv2.contourArea(largest))
-    image_area = float(mask.shape[0] * mask.shape[1])
-    area_ratio = area / image_area
-
-    if area_ratio < MIN_LUNG_AREA_RATIO or area_ratio > MAX_LUNG_AREA_RATIO:
-        return None, area_ratio
-
-    x, y, w, h = cv2.boundingRect(largest)
-
-    # Apply the mask to the ROI.
-    full_mask = cv2.resize(
-        mask,
-        (image_bgr.shape[1], image_bgr.shape[0]),
-        interpolation=cv2.INTER_NEAREST
+    checkpoint = torch.load(
+        CLASSIFIER_PATH,
+        map_location=DEVICE,
     )
 
-    roi = image_bgr[y:y+h, x:x+w] if (
-        y + h <= image_bgr.shape[0] and x + w <= image_bgr.shape[1]
-    ) else image_bgr
+    if isinstance(checkpoint, dict):
+        if "state_dict" in checkpoint:
+            checkpoint = checkpoint["state_dict"]
 
-    roi_mask = full_mask[y:y+h, x:x+w]
+        elif "model_state_dict" in checkpoint:
+            checkpoint = checkpoint[
+                "model_state_dict"
+            ]
 
-    if roi.size == 0 or roi_mask.size == 0:
-        return None, area_ratio
+    model.load_state_dict(
+        checkpoint,
+        strict=False,
+    )
 
-    roi = cv2.bitwise_and(roi, roi, mask=roi_mask)
+    model.to(DEVICE)
 
-    # If ROI contains almost no pixels, reject it.
-    if np.count_nonzero(roi_mask) < 100:
-        return None, area_ratio
+    model.eval()
 
-    return roi, area_ratio
+    _classifier_model = model
+
+    return _classifier_model
+
+
+def prepare_image(image):
+    """
+    Prepare the uploaded image for the trained U-Net.
+
+    The saved U-Net expects RGB input with shape:
+        (batch, 256, 256, 3)
+
+    The downstream classifier is converted to grayscale
+    separately after U-Net ROI extraction.
+    """
+
+    image = image.convert("RGB")
+
+    original_width, original_height = image.size
+
+    resized = image.resize(
+        IMAGE_SIZE,
+        Image.Resampling.BILINEAR,
+    )
+
+    array = np.asarray(
+        resized,
+        dtype=np.float32,
+    ) / 255.0
+
+    # Add batch dimension.
+    # Final shape: (1, 256, 256, 3)
+    array = np.expand_dims(
+        array,
+        axis=0,
+    )
+
+    return (
+        array,
+        original_width,
+        original_height,
+    )
+
+
+def generate_segmentation(image_array):
+    model = load_unet()
+
+    if image_array.ndim != 4 or image_array.shape[-1] != 3:
+        raise ValueError(
+            "Internal image preprocessing error: "
+            "U-Net requires RGB input with shape "
+            "(1, 256, 256, 3)."
+        )
+
+    prediction = model.predict(
+        image_array,
+        verbose=0,
+    )
+
+    mask = prediction[0]
+
+    if mask.ndim == 3:
+        mask = mask[:, :, 0]
+
+    binary_mask = (
+        mask >= 0.5
+    ).astype(np.uint8)
+
+    return binary_mask
+
+
+def extract_roi(image_array, mask):
+    """
+    Extract the segmented ROI from the RGB U-Net input.
+
+    The classifier expects a single grayscale channel, so the
+    RGB image is converted to grayscale only after segmentation.
+    """
+
+    rgb_image = image_array[0]
+
+    # RGB -> grayscale while keeping values in [0, 1].
+    image = (
+        0.299 * rgb_image[:, :, 0]
+        + 0.587 * rgb_image[:, :, 1]
+        + 0.114 * rgb_image[:, :, 2]
+    )
+
+    ys, xs = np.where(mask > 0)
+
+    if len(xs) == 0:
+        return image
+
+    x_min = max(
+        int(xs.min()),
+        0,
+    )
+
+    x_max = min(
+        int(xs.max()) + 1,
+        image.shape[1],
+    )
+
+    y_min = max(
+        int(ys.min()),
+        0,
+    )
+
+    y_max = min(
+        int(ys.max()) + 1,
+        image.shape[0],
+    )
+
+    roi = image[
+        y_min:y_max,
+        x_min:x_max,
+    ]
+
+    if roi.size == 0:
+        return image
+
+    return roi
+
+
+def prepare_classifier_input(roi):
+    image = Image.fromarray(
+        np.uint8(
+            np.clip(roi, 0, 1) * 255
+        )
+    )
+
+    image = image.resize(
+        IMAGE_SIZE,
+        Image.Resampling.BILINEAR,
+    )
+
+    array = np.asarray(
+        image,
+        dtype=np.float32,
+    ) / 255.0
+
+    tensor = torch.from_numpy(
+        array
+    ).unsqueeze(0).unsqueeze(0)
+
+    return tensor.to(DEVICE)
 
 
 def classify_roi(roi):
-    pil_image = Image.fromarray(
-        cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    model = load_classifier()
+
+    classes = load_class_names()
+
+    tensor = prepare_classifier_input(
+        roi
     )
 
-    input_tensor = classifier_transform(pil_image).unsqueeze(0)
-
     with torch.inference_mode():
-        output = model(input_tensor)
-        probabilities = torch.softmax(output, dim=1)[0]
 
-    predicted_index = int(torch.argmax(probabilities).item())
-    confidence = float(probabilities[predicted_index].item() * 100)
+        logits = model(tensor)
 
-    probs = [
-        {
-            "name": class_names[i],
-            "prob": round(float(probabilities[i].item()), 4)
-        }
-        for i in range(len(class_names))
-    ]
+        probabilities = torch.softmax(
+            logits,
+            dim=1,
+        )
 
-    return class_names[predicted_index], confidence, probs
+        confidence, prediction = torch.max(
+            probabilities,
+            dim=1,
+        )
 
+    predicted_index = int(
+        prediction.item()
+    )
+
+    confidence_value = float(
+        confidence.item()
+    )
+
+    if predicted_index >= len(classes):
+        predicted_class = (
+            f"Class {predicted_index}"
+        )
+    else:
+        predicted_class = classes[
+            predicted_index
+        ]
+
+    probs = []
+
+    probability_values = (
+        probabilities[0]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
+    for index, probability in enumerate(
+        probability_values
+    ):
+        if index < len(classes):
+            class_name = classes[index]
+        else:
+            class_name = f"Class {index}"
+
+        probs.append(
+            {
+                "name": class_name,
+                "prob": float(probability),
+            }
+        )
+
+    return {
+        "label": predicted_class,
+        "confidence": confidence_value,
+        "confidence_percent": round(
+            confidence_value * 100,
+            2,
+        ),
+        "probs": probs,
+    }
+
+
+def run_pipeline(image):
+
+    # ========================================================
+    # STEP 1: Basic image validation
+    # ========================================================
+
+    is_valid, validation_error = validate_input_image(image)
+
+    if not is_valid:
+        raise ValueError(validation_error)
+
+    # ========================================================
+    # STEP 2: Prepare RGB image for U-Net
+    # ========================================================
+
+    image_array, width, height = prepare_image(image)
+
+    # ========================================================
+    # STEP 3: U-Net segmentation
+    # ========================================================
+
+    mask = generate_segmentation(image_array)
+
+    # ========================================================
+    # STEP 4: Validate lung segmentation
+    # ========================================================
+
+    mask_pixels = int(np.sum(mask))
+
+    total_pixels = int(
+        mask.shape[0] * mask.shape[1]
+    )
+
+    mask_ratio = (
+        mask_pixels /
+        max(total_pixels, 1)
+    )
+
+    logger.info(
+        "U-Net mask ratio: %.4f",
+        mask_ratio
+    )
+
+    # No lung region detected
+    if mask_pixels == 0:
+        raise ValueError(
+            "Invalid image. "
+            "Please upload a valid lung CT scan image."
+        )
+
+    # Very small segmentation is unlikely to be a valid lung ROI
+    if mask_ratio < 0.03:
+        raise ValueError(
+            "Invalid image. "
+            "No valid lung region was detected. "
+            "Please upload a lung CT scan."
+        )
+
+    # A mask covering almost the entire image is suspicious
+    if mask_ratio > 0.70:
+        raise ValueError(
+            "Invalid image. "
+            "The uploaded image does not appear to "
+            "contain a valid lung CT region."
+        )
+
+    # ========================================================
+    # STEP 5: Extract lung ROI
+    # ========================================================
+
+    roi = extract_roi(
+        image_array,
+        mask
+    )
+
+    # ========================================================
+    # STEP 6: Classify only after validation
+    # ========================================================
+
+    result = classify_roi(
+        roi
+    )
+
+    # ========================================================
+    # STEP 7: Metadata
+    # ========================================================
+
+    result["input_width"] = width
+    result["input_height"] = height
+    result["segmentation_detected"] = True
+    result["mask_ratio"] = round(
+        mask_ratio,
+        4
+    )
+
+    return result
+
+
+# ============================================================
+# ERROR HANDLERS
+# ============================================================
+
+@app.errorhandler(
+    RequestEntityTooLarge
+)
+def handle_file_too_large(error):
+    return (
+        jsonify(
+            {
+                "error": (
+                    f"File exceeds the "
+                    f"{MAX_UPLOAD_MB} MB limit."
+                )
+            }
+        ),
+        413,
+    )
+
+
+# ============================================================
+# ROUTES
+# ============================================================
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html"
+    )
 
 
-@app.route("/predict", methods=["GET", "POST"])
-def predict():
-    if request.method == "GET":
-        return render_template("predict.html")
+@app.route("/predict")
+def predict_page():
+    return render_template(
+        "predict.html"
+    )
 
-    filepath = None
-    import time
-    request_start = time.perf_counter()
+
+@app.route("/health")
+def health():
+    return jsonify(
+        {
+            "status": "healthy",
+            "service": "LungVision AI",
+            "device": str(DEVICE),
+        }
+    )
+
+
+@app.route("/api/health")
+def api_health():
+    return jsonify(
+        {
+            "status": "ok",
+            "service": "LungVision AI",
+            "device": str(DEVICE),
+            "models": {
+                "unet": UNET_PATH.exists(),
+                "classifier": CLASSIFIER_PATH.exists(),
+                "classes": CLASSES_PATH.exists(),
+            },
+        }
+    )
+
+
+@app.route(
+    "/api/predict",
+    methods=["POST"],
+)
+def api_predict():
+    if "file" not in request.files:
+        return jsonify(
+            {
+                "success": False,
+                "error": "No image file supplied.",
+            }
+        ), 400
+
+    uploaded_file = request.files["file"]
+
+    if not uploaded_file.filename:
+        return jsonify(
+            {
+                "success": False,
+                "error": "Filename is empty.",
+            }
+        ), 400
+
+    safe_name = secure_filename(
+        uploaded_file.filename
+    )
+
+    if not allowed_file(safe_name):
+        return jsonify(
+            {
+                "success": False,
+                "error": (
+                    "Unsupported file type. "
+                    "Use PNG, JPG or JPEG."
+                ),
+            }
+        ), 400
 
     try:
-        if "image" not in request.files:
-            return jsonify({"error": "No image uploaded."}), 400
+        image_bytes = uploaded_file.read()
 
-        file = request.files["image"]
+        if not image_bytes:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "Uploaded file is empty.",
+                }
+            ), 400
 
-        if not file.filename:
-            return jsonify({"error": "No file selected."}), 400
-
-        original_filename = file.filename.lower()
-
-        if not original_filename.endswith((".jpg", ".jpeg")):
-            return jsonify({
-                "error": "Only JPG and JPEG images are allowed."
-            }), 400
-
-        filename = (
-            uuid.uuid4().hex
-            + "_"
-            + os.path.basename(file.filename)
+        image = Image.open(
+            io.BytesIO(image_bytes)
         )
 
-        filepath = os.path.join(
-            UPLOAD_FOLDER,
-            filename
+        image.load()
+
+        result = run_pipeline(
+            image
         )
 
-        file.save(filepath)
+        return jsonify(
+            {
+                "success": True,
+                "filename": safe_name,
+                "prediction": result,
+            }
+        )
 
-        # Read with OpenCV for validation and U-Net.
-        image_bgr = cv2.imread(filepath)
+    except UnidentifiedImageError:
+        return jsonify(
+            {
+                "success": False,
+                "error": (
+                    "Uploaded file is not a valid image."
+                ),
+            }
+        ), 400
 
-        if image_bgr is None:
-            return jsonify({
-                "error": "Could not read the uploaded image."
-            }), 400
+    except ValueError as error:
+        logger.warning(
+            "API image validation rejected: %s",
+            error,
+        )
 
-        # Layer 1: obvious non-CT rejection.
-        valid, reason = looks_like_lung_ct(image_bgr)
+        return jsonify(
+            {
+                "success": False,
+                "error": str(error),
+            }
+        ), 400
 
-        if not valid:
+    except FileNotFoundError as error:
+        logger.exception(
+            "Model file missing."
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "error": str(error),
+            }
+        ), 500
+
+    except Exception:
+        logger.exception(
+            "Prediction failed."
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "error": (
+                    "Prediction failed. "
+                    "Check server logs."
+                ),
+            }
+        ), 500
+
+
+@app.route(
+    "/predict",
+    methods=["POST"],
+)
+def predict():
+    if "image" not in request.files:
+        return render_template(
+            "result.html",
+            error=(
+                "Please upload a lung CT scan image."
+            ),
+        )
+
+    uploaded_file = request.files["image"]
+
+    if not uploaded_file.filename:
+        return render_template(
+            "result.html",
+            error="Please select an image.",
+        )
+
+    safe_name = secure_filename(
+        uploaded_file.filename
+    )
+
+    if not allowed_file(safe_name):
+        return render_template(
+            "result.html",
+            error=(
+                "Invalid file type. "
+                "Please upload a JPG, JPEG or PNG "
+                "lung CT scan image."
+            ),
+        )
+
+    try:
+        image_bytes = uploaded_file.read()
+
+        if not image_bytes:
             return render_template(
                 "result.html",
-                predicted_class="Invalid Input",
-                confidence=0,
-                probs=[],
-                error_message=reason
+                error=(
+                    "The uploaded file is empty. "
+                    "Please upload a valid lung CT scan."
+                ),
             )
 
-        # Layer 2: U-Net lung-region validation.
-        roi, lung_area_ratio = get_lung_roi(image_bgr)
+        image = Image.open(
+            io.BytesIO(image_bytes)
+        )
 
-        if roi is None:
-            return render_template(
-                "result.html",
-                predicted_class="Invalid Input",
-                confidence=0,
-                probs=[],
-                error_message=(
-                    "No valid lung region was detected. "
-                    "Please upload a clear lung CT image."
-                )
-            )
+        image.load()
 
-        # Layer 3: classifier.
-        predicted_class, confidence, probs = classify_roi(roi)
+        result = run_pipeline(
+            image
+        )
 
-        if confidence < MIN_CLASS_CONFIDENCE:
-            return render_template(
-                "result.html",
-                predicted_class="Uncertain",
-                confidence=confidence,
-                probs=probs,
-                error_message=(
-                    "The model is not confident enough to classify this image."
-                )
-            )
+        predicted_class = result.get(
+            "label",
+            "Unknown",
+        )
 
-        print(
-            f"Total prediction time: "
-            f"{time.perf_counter() - request_start:.2f}s"
+        confidence = result.get(
+            "confidence_percent",
+            0,
+        )
+
+        probs = result.get(
+            "probs",
+            [],
         )
 
         return render_template(
             "result.html",
             predicted_class=predicted_class,
             confidence=confidence,
-            probs=probs
+            probs=probs,
+            filename=safe_name,
+            result=result,
         )
 
-    except Exception as e:
-        print("Prediction error:", repr(e))
+    except UnidentifiedImageError:
+        logger.warning(
+            "Invalid image uploaded: %s",
+            safe_name,
+        )
 
-        return jsonify({
-            "error": "Prediction failed.",
-            "details": str(e)
-        }), 500
+        return render_template(
+            "result.html",
+            error=(
+                "Please enter a correct lung CT scan image. "
+                "The uploaded file is not a valid image."
+            ),
+        )
 
-    finally:
-        if filepath and os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except Exception as cleanup_error:
-                print("Could not remove temporary image:", cleanup_error)
+    except ValueError as error:
+        logger.warning(
+            "Image validation rejected: %s",
+            error,
+        )
 
-        # Local development: keep U-Net cached so the next prediction is fast.
-        # Render: release it after each request to reduce memory pressure.
-        if os.environ.get("RENDER") == "true":
-            unload_unet()
+        return render_template(
+            "result.html",
+            error=str(error),
+        )
+
+    except FileNotFoundError:
+        logger.exception(
+            "Required model file is missing."
+        )
+
+        return render_template(
+            "result.html",
+            error=(
+                "Required AI model files are missing. "
+                "Please check the models directory."
+            ),
+        )
+
+    except Exception:
+        logger.exception(
+            "Unexpected prediction error."
+        )
+
+        return render_template(
+            "result.html",
+            error=(
+                "Prediction could not be completed. "
+                "Please try another valid lung CT image."
+            ),
+        )
 
 
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "healthy",
-        "classifier": "loaded",
-        "unet_loaded": _unet is not None,
-        "device": str(device),
-        "classes": class_names
-    })
-
+# ============================================================
+# APPLICATION ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+
+    port = int(
+        os.getenv("PORT", "5000")
+    )
 
     app.run(
         host="0.0.0.0",
         port=port,
-        debug=False
+        debug=False,
     )
